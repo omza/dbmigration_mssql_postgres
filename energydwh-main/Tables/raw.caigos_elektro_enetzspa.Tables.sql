@@ -1,0 +1,26 @@
+CREATE TABLE [raw].[caigos_elektro_enetzspa]
+(
+    [load_log_id] [sys].[bigint] NOT NULL,
+    [load_at] [sys].[datetime] NOT NULL,
+    [ens_bez] varchar(90) COLLATE Latin1_General_CI_AS NULL,
+    [ens_datestampedit] [sys].[datetime] NULL,
+    [ens_datestampnew] [sys].[datetime] NULL,
+    [ens_farbe] [sys].[int] NULL,
+    [ens_fremdkey] varchar(80) COLLATE Latin1_General_CI_AS NULL,
+    [ens_id] varchar(38) COLLATE Latin1_General_CI_AS NOT NULL,
+    [ens_kuerzel] varchar(10) COLLATE Latin1_General_CI_AS NULL,
+    [ens_pmfkey] varchar(38) COLLATE Latin1_General_CI_AS NOT NULL,
+    [ens_pmfmark] [sys].[int] NULL,
+    [ens_spbereich] varchar(2) COLLATE Latin1_General_CI_AS NULL,
+    [ens_timestampedit] varchar(5) COLLATE Latin1_General_CI_AS NULL,
+    [ens_timestampnew] varchar(5) COLLATE Latin1_General_CI_AS NULL,
+    [ens_userstampedit] varchar(30) COLLATE Latin1_General_CI_AS NULL,
+    [ens_userstampnew] varchar(30) COLLATE Latin1_General_CI_AS NULL,
+    [ens_data_herkunft] varchar(50) COLLATE Latin1_General_CI_AS NULL,
+    [ens_dmsdoccount] [sys].[int] NULL,
+    [ens_userfld1] varchar(60) COLLATE Latin1_General_CI_AS NULL,
+    [ens_userfld2] varchar(60) COLLATE Latin1_General_CI_AS NULL,
+    [ens_userfld3] varchar(60) COLLATE Latin1_General_CI_AS NULL,
+    [ens_userfld4] varchar(60) COLLATE Latin1_General_CI_AS NULL,
+    [ens_userfld5] varchar(60) COLLATE Latin1_General_CI_AS NULL
+);

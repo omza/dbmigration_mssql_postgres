@@ -1,0 +1,26 @@
+CREATE TABLE [raw].[wilken_entredaten]
+(
+    [load_log_id] [sys].[bigint] NOT NULL,
+    [load_at] [sys].[datetime] NOT NULL,
+    [TRD_ID] decimal(12,0) NOT NULL,
+    [TRE_ID] decimal(12,0) NOT NULL,
+    [TRD_GUELTIGAB] [sys].[datetime] NOT NULL,
+    [TRD_ARTNUTZUNG] decimal(3,0) NOT NULL,
+    [TRD_NENNLEISTUNG_ABGABE] decimal(12,3) NULL,
+    [TRD_NENNLEISTUNG_AUFNAHME] decimal(12,3) NULL,
+    [TRD_SPEICHERKAPAZITAET] decimal(18,3) NULL,
+    [TRD_ERZEUGUNGSART] decimal(3,0) NULL,
+    [TRD_SPEICHERART] decimal(3,0) NULL,
+    [SRE_ID] decimal(12,0) NULL,
+    [WAEN_NR] decimal(5,0) NULL,
+    [SVBA_NR] decimal(5,0) NULL,
+    [TRD_ANGELEGT] [sys].[datetime] NOT NULL,
+    [TRD_GEAENDERT] [sys].[datetime] NULL,
+    [NLK_ID] decimal(12,0) NULL,
+    [TRD_VERBR_RES_EINORDNUNG] decimal(1,0) NULL,
+    [TRD_VERBR_RES_IS_ENWG] decimal(1,0) NULL,
+    [TRD_VERBR_RES_INBETRIEBSETZUNG] decimal(1,0) NULL,
+    [TRD_WEITERE_TECH_EINRICHTUNGEN] decimal(1,0) NULL,
+    [TRD_FERNSTEUERBARKEIT_EEG] decimal(1,0) NULL,
+    [TRD_VERGUETUNGSVERPFLICHTUNG] decimal(1,0) NULL
+);

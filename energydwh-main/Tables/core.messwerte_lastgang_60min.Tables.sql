@@ -1,0 +1,78 @@
+CREATE TABLE [core].[messwerte_lastgang_60min]
+(
+    [id_messpunkt] [sys].[int] NOT NULL,
+    [id_energieart] [sys].[int] NOT NULL,
+    [id_obis] [sys].[int] NOT NULL,
+    [messeinheit] varchar(5) COLLATE Latin1_General_CI_AS NOT NULL,
+    [tag] [sys].[date] NOT NULL,
+    [id_typtag] [sys].[int] CONSTRAINT [DF__messwerte__id_ty__13D2C5B1] DEFAULT ((0)) NOT NULL,
+    [id_zeitumstellung] [sys].[int] CONSTRAINT [DF__messwerte__id_ze__14C6E9EA] DEFAULT ((0)) NOT NULL,
+    [id_version] [sys].[int] NOT NULL,
+    [max_wert] decimal(15,3) NULL,
+    [summe_wert] decimal(15,3) NULL,
+    [tagesverbrauch_kWh] decimal(15,3) NULL,
+    [wertstatus_gesamt] [sys].[int] NULL,
+    [0] decimal(15,3) NULL,
+    [1] decimal(15,3) NULL,
+    [2] decimal(15,3) NULL,
+    [3] decimal(15,3) NULL,
+    [4] decimal(15,3) NULL,
+    [5] decimal(15,3) NULL,
+    [6] decimal(15,3) NULL,
+    [7] decimal(15,3) NULL,
+    [8] decimal(15,3) NULL,
+    [9] decimal(15,3) NULL,
+    [10] decimal(15,3) NULL,
+    [11] decimal(15,3) NULL,
+    [12] decimal(15,3) NULL,
+    [13] decimal(15,3) NULL,
+    [14] decimal(15,3) NULL,
+    [15] decimal(15,3) NULL,
+    [16] decimal(15,3) NULL,
+    [17] decimal(15,3) NULL,
+    [18] decimal(15,3) NULL,
+    [19] decimal(15,3) NULL,
+    [20] decimal(15,3) NULL,
+    [21] decimal(15,3) NULL,
+    [22] decimal(15,3) NULL,
+    [23] decimal(15,3) NULL,
+    [b_stunde] decimal(15,3) NULL,
+    [wertstatus_0] [sys].[int] NULL,
+    [wertstatus_1] [sys].[int] NULL,
+    [wertstatus_2] [sys].[int] NULL,
+    [wertstatus_3] [sys].[int] NULL,
+    [wertstatus_4] [sys].[int] NULL,
+    [wertstatus_5] [sys].[int] NULL,
+    [wertstatus_6] [sys].[int] NULL,
+    [wertstatus_7] [sys].[int] NULL,
+    [wertstatus_8] [sys].[int] NULL,
+    [wertstatus_9] [sys].[int] NULL,
+    [wertstatus_10] [sys].[int] NULL,
+    [wertstatus_11] [sys].[int] NULL,
+    [wertstatus_12] [sys].[int] NULL,
+    [wertstatus_13] [sys].[int] NULL,
+    [wertstatus_14] [sys].[int] NULL,
+    [wertstatus_15] [sys].[int] NULL,
+    [wertstatus_16] [sys].[int] NULL,
+    [wertstatus_17] [sys].[int] NULL,
+    [wertstatus_18] [sys].[int] NULL,
+    [wertstatus_19] [sys].[int] NULL,
+    [wertstatus_20] [sys].[int] NULL,
+    [wertstatus_21] [sys].[int] NULL,
+    [wertstatus_22] [sys].[int] NULL,
+    [wertstatus_23] [sys].[int] NULL,
+    [wertstatus_b_stunde] [sys].[int] NULL,
+    [created_at] [sys].[datetime] CONSTRAINT [DF__messwerte__creat__15BB0E23] DEFAULT (getdate()) NOT NULL,
+    [changed_at] [sys].[datetime] CONSTRAINT [DF__messwerte__chang__16AF325C] DEFAULT (getdate()) NULL,
+    CONSTRAINT [pk_messwerte_lastgang_60min] PRIMARY KEY CLUSTERED ([id_messpunkt] ASC, [id_obis] ASC, [tag] ASC)
+);
+
+ALTER TABLE [core].[messwerte_lastgang_60min]
+ADD CONSTRAINT [fk_messwerte_lastgang_60min_energiearten]
+FOREIGN KEY ([id_energieart])
+REFERENCES [core].[energiearten] ([id_energieart]);
+
+ALTER TABLE [core].[messwerte_lastgang_60min]
+ADD CONSTRAINT [fk_messwerte_lastgang_60min_obis]
+FOREIGN KEY ([id_obis])
+REFERENCES [core].[obis] ([id_obis]);
