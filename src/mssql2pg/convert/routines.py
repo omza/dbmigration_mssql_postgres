@@ -25,7 +25,7 @@ from sqlglot.tokens import Token, TokenType
 from ..model import PgObject, SourceObject
 from ..naming import pg_name, quote
 from .common import Ctx, Unsupported, map_datatype, normalize, to_pg
-from .types import TypeSchema, coerce
+from .types import TypeSchema, coerce, coerce_assignments
 
 
 
@@ -534,6 +534,25 @@ class Parser:
             return tree
         if isinstance(tree, (exp.Select, exp.SetOperation)):
             return coerce(tree, self.types, self.ctx)
+        with_ = tree.args.get("with_")
+        if with_ is not None:
+            # WITH ... INSERT/MERGE/UPDATE/DELETE: CTEs gemeinsam mit der Hauptabfrage typisieren,
+            # damit CTEs einander (und die Hauptabfrage die CTEs) sehen
+            inner = None
+            if isinstance(tree, exp.Insert) and isinstance(tree.expression, (exp.Select, exp.SetOperation)):
+                inner = tree.expression
+            elif isinstance(tree, exp.Merge) and isinstance(tree.args.get("using"), exp.Subquery):
+                inner = tree.args["using"].this
+            wrapper = inner.copy() if inner is not None else exp.select("1")
+            wrapper.set("with_", with_.copy())
+            q = coerce(wrapper, self.types, self.ctx)
+            new_with = q.args.get("with_")
+            q.set("with_", None)
+            tree.set("with_", new_with)
+            if inner is not None:
+                inner.replace(q)
+            coerce_assignments(tree, self.types, self.ctx)
+            return tree
         def nested(node: exp.Expr) -> bool:
             a = node.parent
             while a is not None and a is not tree:
@@ -545,6 +564,7 @@ class Parser:
         outer = [s for s in tree.find_all(exp.Select, exp.SetOperation) if not nested(s)]
         for s in outer:
             s.replace(coerce(s, self.types, self.ctx))
+        coerce_assignments(tree, self.types, self.ctx)
         return tree
 
     def translate_dml(self, tree: exp.Expr) -> list[str]:
@@ -608,6 +628,11 @@ class Parser:
                     self.temp_name(t)
             tree.set("exists", True)
 
+        if any(isinstance(m.parent, (exp.Subquery, exp.From)) or m.find_ancestor(exp.Select)
+               for m in tree.find_all(exp.Merge) if m is not tree):
+            raise Unsupported("MERGE ... OUTPUT als Unterabfrage (in PostgreSQL nur als CTE mit RETURNING) – Override")
+        if isinstance(tree, exp.Merge):
+            _merge_cte_target(tree, self.types)
         if isinstance(tree, exp.Update):
             _fix_update_from(tree)
         if isinstance(tree, exp.Delete):
@@ -631,7 +656,11 @@ class Parser:
             raise Unsupported(f"Ausdruck nicht parsebar: {sql[:60]!r}") from e
         if not isinstance(tree, exp.Select) or len(tree.expressions) != 1 or tree.args.get("from_"):
             raise Unsupported(f"Ausdruck nicht eindeutig: {sql[:60]!r}")
-        return to_pg(normalize(tree.expressions[0], self.ctx), pretty=False)
+        tree = normalize(tree, self.ctx)
+        if self.types is not None:
+            tree = coerce(tree, self.types, self.ctx)
+        e = tree.expressions[0]
+        return to_pg(e.this if isinstance(e, exp.Alias) else e, pretty=False)
 
     def pg_type_text(self, tsql_type: str) -> str:
         t = re.sub(r"\[([^\]]+)\]", r"\1", tsql_type.strip())
@@ -742,6 +771,88 @@ def _fix_delete_from(tree: exp.Delete) -> None:
     else:
         tree.set("using", None)
     tree.set("where", exp.Where(this=cond) if cond is not None else None)
+
+
+# --------------------------------------------------------------------------- MERGE INTO cte
+
+
+def _merge_cte_target(tree: exp.Merge, types: TypeSchema | None = None) -> None:
+    """WITH t AS (SELECT ... FROM basis [WHERE f]) MERGE INTO t AS ziel ...
+    -> MERGE INTO basis AS ziel ... (CTE-Spalten durch Ausdrücke ersetzt, Filter in ON und NOT MATCHED BY SOURCE).
+    PostgreSQL erlaubt kein MERGE in eine CTE."""
+    with_ = tree.args.get("with_")
+    target = tree.this
+    if with_ is None or not isinstance(target, exp.Table) or target.args.get("db"):
+        return
+    cte = next((c for c in with_.expressions if c.alias_or_name.lower() == target.name.lower()), None)
+    if cte is None:
+        return
+    sel = cte.this
+    if not isinstance(sel, exp.Select) or sel.args.get("joins") or sel.args.get("group") \
+            or sel.args.get("distinct") or sel.args.get("limit") or not isinstance(sel.args.get("from_").this, exp.Table):
+        raise Unsupported("MERGE in eine CTE mit Joins/Gruppierung (in PostgreSQL nicht möglich)")
+    base = sel.args["from_"].this
+    base_alias = (base.alias or base.name).lower()
+    alias = (target.alias or target.name)
+
+    def requalify(e: exp.Expr) -> exp.Expr:
+        e = e.copy()
+        for c in e.find_all(exp.Column):
+            if not c.table or c.table.lower() == base_alias:
+                c.set("table", exp.to_identifier(alias))
+        return e
+
+    mapping: dict[str, exp.Expr] = {}
+    for p in sel.selects:
+        if isinstance(p, exp.Star) or (isinstance(p, exp.Column) and isinstance(p.this, exp.Star)):
+            cols = types.mapping.get(pg_name(base.db or "dbo"), {}).get(pg_name(base.name)) if types else None
+            if not cols:
+                raise Unsupported("MERGE in eine CTE mit SELECT * auf unbekannte Tabelle")
+            for c in cols:
+                mapping[c] = exp.column(c, table=alias)
+            continue
+        mapping[p.alias_or_name.lower()] = requalify(p.this if isinstance(p, exp.Alias) else p)
+
+    def plain_column(name: str) -> str:
+        e = mapping.get(name.lower())
+        if not isinstance(e, exp.Column):
+            raise Unsupported(f"MERGE in eine CTE: Zielspalte {name} ist berechnet")
+        return e.name
+
+    whens = tree.args["whens"]
+    # Zielspalten in UPDATE SET / INSERT (...) auf Basisspalten abbilden
+    for w in whens.expressions:
+        then = w.args.get("then")
+        if isinstance(then, exp.Update):
+            for eq in then.expressions:
+                eq.this.set("this", exp.to_identifier(plain_column(eq.this.name)))
+                eq.this.set("table", None)
+        elif isinstance(then, exp.Insert) and isinstance(then.this, exp.Tuple):
+            for c in then.this.expressions:
+                c.set("this", exp.to_identifier(plain_column(c.name)))
+    # Referenzen ziel.spalte -> Ausdruck über die Basistabelle
+    for node in [tree.args["on"], *[w for w in whens.expressions]]:
+        for c in list(node.find_all(exp.Column)):
+            if c.table and c.table.lower() == alias.lower() and c.name.lower() in mapping:
+                if isinstance(c.parent, exp.EQ) and c.parent.this is c and isinstance(c.parent.parent, exp.Update):
+                    continue
+                c.replace(mapping[c.name.lower()].copy())
+    where = sel.args.get("where")
+    if where is not None:
+        f = requalify(where.this)
+        tree.set("on", exp.and_(exp.Paren(this=tree.args["on"]), exp.Paren(this=f)))
+        for w in whens.expressions:
+            if w.args.get("source"):          # WHEN NOT MATCHED BY SOURCE: nur gefilterte Zielzeilen
+                cond = w.args.get("condition")
+                w.set("condition", exp.and_(exp.Paren(this=f.copy()), exp.Paren(this=cond)) if cond else f.copy())
+    new_target = base.copy()
+    new_target.set("alias", exp.TableAlias(this=exp.to_identifier(alias)))
+    tree.set("this", new_target)
+    rest = [c for c in with_.expressions if c is not cte]
+    if rest:
+        with_.set("expressions", rest)
+    else:
+        tree.set("with_", None)
 
 
 # --------------------------------------------------------------------------- Kopf (CREATE PROC/FUNCTION)

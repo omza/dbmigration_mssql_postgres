@@ -24,7 +24,13 @@ Empfohlene Zieldatenbank:
 CREATE DATABASE energydwh TEMPLATE template0 ENCODING 'UTF8'
     LOCALE_PROVIDER icu ICU_LOCALE 'de-DE' LOCALE 'de_DE.UTF-8';
 ALTER DATABASE energydwh SET timezone = 'Europe/Berlin';
+ALTER DATABASE energydwh SET datestyle = 'ISO, DMY';   -- Datums-Strings wie '31.12.2099' (wie MSSQL mit deutscher Sprache)
+CREATE EXTENSION IF NOT EXISTS plpgsql_check;          -- optional, Paket postgresql-18-plpgsql-check
 ```
+
+PostgreSQL prüft PL/pgSQL-Rümpfe beim Anlegen nur syntaktisch. Ist `plpgsql_check` verfügbar, prüft `deploy` danach jede
+übersetzte Funktion statisch (unbekannte Tabellen/Spalten, Typkonflikte). Ohne die Extension gibt es nur einen Hinweis.
+Meldungen zu Temp-Tabellen (`tmp_*`) gelten als „nicht prüfbar“, weil diese erst zur Laufzeit entstehen.
 
 ## Befehle
 
@@ -35,6 +41,7 @@ ALTER DATABASE energydwh SET timezone = 'Europe/Berlin';
 | `mssql2pg mig --show schema.name` | konvertiert ein Objekt und gibt es aus (schreibt nichts) |
 | `mssql2pg deploy [-y] [--dry-run]` | **löscht** alle verwalteten Schemas (`DROP SCHEMA … CASCADE`) und baut sie in Abhängigkeitsreihenfolge neu auf; Report in `OUT_DIR/deploy_report.json` |
 | `mssql2pg data [-t muster] [-x muster] [-j N] [--resume]` | kopiert alle Tabellen außer RAW-Schema/Blacklist (parallel, gechunkt, COPY), danach Indizes, FKs (`NOT VALID` + Validierung), Identity-Reset, `ANALYZE` |
+| `mssql2pg check` | prüft die deployten PL/pgSQL-Funktionen mit `plpgsql_check` (Report `OUT_DIR/check_report.json`); läuft bei `deploy` automatisch mit (`--no-check` zum Abschalten) |
 | `mssql2pg validate [-l 1..3] [--report r.md]` | Abgleich MSSQL ↔ PG: Zeilenzahl / Spaltenaggregate / Zeilen-Hashes |
 
 Globale Option: `--env-file pfad` (Default `.env`).
@@ -68,7 +75,10 @@ Implizite Typkonvertierungen: `mig` ermittelt die Spaltentypen aller Tabellen un
 und macht T-SQL-Konvertierungen nach Datentyp-Rangfolge explizit (`int = varchar` → Cast, `bit = 1` → `= TRUE`,
 `datetime + n` → `+ n * INTERVAL '1 day'`, `ISNULL` vs. `COALESCE`, UNION-Spalten inkl. `NULL`).
 Dafür werden Spalten in der Ausgabe qualifiziert und `*` expandiert (semantisch identisch).
-In Routinen gilt das nur für SELECT-Teile; PL/pgSQL-Rümpfe prüft PostgreSQL erst zur Laufzeit.
+In Routinen zusätzlich: Zuweisungen in INSERT/UPDATE/MERGE werden auf die Typen der Zielspalten gebracht
+(`''` → 0 bei int, Zahl → boolean), INSERT ohne Spaltenliste bekommt die Spalten ohne Identity,
+`MERGE INTO cte` wird auf die Basistabelle umgeschrieben, `CHECKSUM(...)` → `hashtext(ROW(...)::text)`,
+`PATINDEX` → `regexp_instr`.
 
 ## Overrides
 

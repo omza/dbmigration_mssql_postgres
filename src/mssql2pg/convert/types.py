@@ -56,12 +56,15 @@ class TypeSchema:
 
     def __init__(self) -> None:
         self.mapping: dict[str, dict[str, dict[str, str]]] = {}
+        self.identity: dict[tuple[str, str], set[str]] = {}
         self._schema: MappingSchema | None = None
 
-    def add(self, schema: str, name: str, columns: dict[str, str]) -> None:
+    def add(self, schema: str, name: str, columns: dict[str, str], identity: set[str] | None = None) -> None:
         if not columns:
             return
         self.mapping.setdefault(schema, {})[name] = columns
+        if identity:
+            self.identity[(schema, name)] = set(identity)
         self._schema = None
 
     @property
@@ -77,9 +80,27 @@ def _type(node: exp.Expr, ctx: Ctx) -> exp.DataType | None:
     if isinstance(node, exp.Column) and not node.table and node.name in ctx.var_types:
         return exp.DataType.build(ctx.var_types[node.name], dialect="postgres")
     t = node.type
-    if t is None or t.this in (T.UNKNOWN, T.NULL):
-        return None
-    return t
+    if t is not None and t.this not in (T.UNKNOWN, T.NULL):
+        return t
+    # Fallbacks, wenn annotate_types den Typ nicht kennt (z.B. wegen PL/pgSQL-Variablen)
+    if isinstance(node, exp.Literal):
+        if node.is_string:
+            return exp.DataType.build("varchar")
+        return exp.DataType.build("numeric" if "." in str(node.this) else "int")
+    if isinstance(node, exp.Cast):
+        return node.to
+    if isinstance(node, (exp.DPipe, exp.Concat, exp.Upper, exp.Lower, exp.Trim, exp.Substring, exp.Left,
+                         exp.Right, exp.Overlay)):
+        return exp.DataType.build("text")
+    if isinstance(node, exp.Anonymous) and node.name.lower() in ("ltrim", "rtrim", "replace", "concat_ws", "repeat"):
+        return exp.DataType.build("text")
+    if isinstance(node, exp.Coalesce):
+        return next((x for x in (_type(a, ctx) for a in [node.this, *node.expressions]) if x is not None), None)
+    if isinstance(node, exp.Case):
+        branches = [i.args["true"] for i in node.args.get("ifs") or []] + \
+            ([node.args["default"]] if node.args.get("default") is not None else [])
+        return next((x for x in (_type(b, ctx) for b in branches if not _is_str_literal(b)) if x is not None), None)
+    return None
 
 
 def _is_str_literal(n: exp.Expr) -> bool:
@@ -108,6 +129,20 @@ def _cast(node: exp.Expr, to: exp.DataType) -> exp.Expr:
     return c
 
 
+def _empty_string_value(target: exp.DataType) -> exp.Expr | None:
+    """T-SQL: '' -> 0 für Ganz-/Gleitkommazahlen, 1900-01-01 für Datum/Zeit."""
+    c = category(target)
+    if c in (3, 5):
+        return exp.Literal.number(0)
+    if c == 6:
+        return exp.cast(exp.Literal.string("1900-01-01"), target.copy())
+    return None
+
+
+def _is_empty_string(n: exp.Expr) -> bool:
+    return _is_str_literal(n) and (n.this if isinstance(n, exp.Literal) else n.unnest().this) == ""
+
+
 def _target_type(types: list[exp.DataType]) -> exp.DataType:
     """Höchster Typ nach Rangfolge; bei gleicher Kategorie der erste."""
     return max(types, key=lambda t: category(t) or 0)
@@ -128,6 +163,11 @@ def _coerce_pair(a: exp.Expr, b: exp.Expr, ctx: Ctx) -> tuple[exp.Expr, exp.Expr
             if new_y is None:
                 new_y = y
             return (new_y, new_x) if swap else (new_x, new_y)
+    # '' wird von T-SQL zu 0 bzw. 1900-01-01, PostgreSQL lehnt es ab
+    if ca == 1 and _is_empty_string(a) and (v := _empty_string_value(tb)) is not None:
+        return v, b
+    if cb == 1 and _is_empty_string(b) and (v := _empty_string_value(ta)) is not None:
+        return a, v
     # Text-Literale löst PostgreSQL selbst auf (Typ unknown)
     if (ca == 1 and _is_str_literal(a)) or (cb == 1 and _is_str_literal(b)):
         return a, b
@@ -155,7 +195,8 @@ def _coerce_list(items: list[exp.Expr], ctx: Ctx, target: exp.DataType | None = 
             # ISNULL(varchar, 0): Ergebnis ist Text -> Zahl als Text
             out.append(_cast(i, target) if not _is_str_literal(i) else i)
         elif _is_str_literal(i):
-            out.append(i)
+            v = _empty_string_value(target) if _is_empty_string(i) else None
+            out.append(v if v is not None else i)
         elif c == 2 and ct in (3, 4, 5):
             out.append(_cast(i, exp.DataType.build("int")))
         elif c in (1, 3, 4, 5) and ct in (2, 3, 4, 5, 6):
@@ -306,15 +347,167 @@ def _fix_unions(tree: exp.Expr, ctx: Ctx) -> None:
                         p.replace(exp.alias_(nv, p.alias_or_name or f"col{i}"))
 
 
+def assign_value(value: exp.Expr, target: exp.DataType, ctx: Ctx) -> exp.Expr:
+    """Wert für eine Zuweisung an eine Spalte des Typs target (INSERT/UPDATE/MERGE)."""
+    t = _type(value, ctx)
+    ct, cv = category(target), category(t)
+    if _is_null(value) or ct is None:
+        return value
+    if _is_empty_string(value):
+        v = _empty_string_value(target)
+        return v if v is not None else value
+    if _is_str_literal(value) or cv is None or cv == ct:
+        return value
+    if ct == 2:
+        lit = _is_num_literal(value)
+        if lit is not None:
+            return exp.Boolean(this=lit.this not in ("0", 0))
+        return _cast(value, target)
+    if ct == 1:
+        return value          # Zahl/Datum -> Text: PostgreSQL hat Zuweisungs-Casts
+    return _cast(value, target)
+
+
+def _annotate_loose(node: exp.Expr, types: TypeSchema) -> None:
+    try:
+        annotate_types(node, schema=types.schema, dialect="postgres")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def coerce_assignments(tree: exp.Expr, types: TypeSchema, ctx: Ctx) -> None:
+    """INSERT (VALUES/SELECT), UPDATE SET und MERGE: Werte auf die Typen der Zielspalten casten."""
+    if isinstance(tree, (exp.Insert, exp.Update, exp.Merge)):
+        target = tree.this.this if isinstance(tree.this, exp.Schema) else tree.this
+    else:
+        return
+    if not isinstance(target, exp.Table) or not target.args.get("db"):
+        return
+    cols = types.mapping.get(target.db, {}).get(target.name)
+    if not cols:
+        return
+
+    def tt(col: exp.Expr) -> exp.DataType | None:
+        name = col.name if isinstance(col, (exp.Column, exp.Identifier)) else None
+        return exp.DataType.build(cols[name], dialect="postgres") if name in cols else None
+
+    def fix_rows(col_list: list[exp.Expr], source: exp.Expr | None) -> None:
+        if source is None:
+            return
+        if isinstance(source, exp.Values):
+            for row in source.expressions:
+                if isinstance(row, exp.Tuple):
+                    _annotate_loose(row, types)
+                    row.set("expressions", [assign_value(v, t, ctx) if (t := tt(c)) is not None else v
+                                            for c, v in zip(col_list, row.expressions)])
+        elif isinstance(source, exp.Tuple):
+            _annotate_loose(source, types)
+            source.set("expressions", [assign_value(v, t, ctx) if (t := tt(c)) is not None else v
+                                       for c, v in zip(col_list, source.expressions)])
+        elif isinstance(source, exp.Select):
+            for c, p in zip(col_list, source.selects):
+                t = tt(c)
+                v = p.this if isinstance(p, exp.Alias) else p
+                if t is None:
+                    continue
+                nv = assign_value(v, t, ctx)
+                if nv is not v:
+                    if isinstance(p, exp.Alias):
+                        p.set("this", nv)
+                    else:
+                        p.replace(nv)
+
+    def fix_set(eqs: list[exp.Expr]) -> None:
+        for eq in eqs:
+            if isinstance(eq, exp.EQ) and (t := tt(eq.this)) is not None:
+                _annotate_loose(eq.expression, types)
+                eq.set("expression", assign_value(eq.expression, t, ctx))
+
+    target_alias = (target.alias or target.name)
+
+    def type_target_columns(node: exp.Expr | None, allow_unqualified: bool) -> None:
+        if node is None:
+            return
+        for col in node.find_all(exp.Column):
+            if (col.table == target_alias or (allow_unqualified and not col.table)) and col.name in cols \
+                    and (col.type is None or col.type.this == T.UNKNOWN):
+                col.type = exp.DataType.build(cols[col.name], dialect="postgres")
+
+    def fix_conditions(node: exp.Expr | None) -> None:
+        if node is None:
+            return
+        for n in reversed(list(node.walk())):
+            new = _fix(n, ctx)
+            if new is not n and n is not node:
+                n.replace(new)
+
+    if isinstance(tree, exp.Insert) and not isinstance(tree.this, exp.Schema) and tree.expression is not None:
+        # T-SQL: INSERT ohne Spaltenliste überspringt die Identity-Spalte
+        ident = types.identity.get((target.db, target.name), set())
+        names = [c for c in cols if c not in ident]
+        tree.set("this", exp.Schema(this=target.copy(), expressions=[exp.to_identifier(c) for c in names]))
+
+    if isinstance(tree, (exp.Update, exp.Delete)):
+        where = tree.args.get("where")
+        if where is not None:
+            _annotate_loose(where, types)
+        type_target_columns(tree, allow_unqualified=True)
+        if where is not None:
+            fix_conditions(where)
+
+    if isinstance(tree, exp.Merge):
+        # Typen der Quellspalten aus der (bereits annotierten) USING-Unterabfrage übernehmen
+        using = tree.args.get("using")
+        if isinstance(using, exp.Subquery) and using.alias:
+            sel = using.this
+            while isinstance(sel, exp.SetOperation):
+                sel = sel.left
+            if isinstance(sel, exp.Select):
+                src_types = {p.alias_or_name: p.type for p in sel.selects if p.type is not None}
+                for part in (tree.args["whens"], tree.args.get("on")):
+                    for col in part.find_all(exp.Column):
+                        if col.table == using.alias and col.name in src_types:
+                            col.type = src_types[col.name].copy()
+        type_target_columns(tree.args.get("on"), allow_unqualified=False)
+        type_target_columns(tree.args["whens"], allow_unqualified=False)
+        fix_conditions(tree.args.get("on"))
+        for w in tree.args["whens"].expressions:
+            fix_conditions(w.args.get("condition"))
+
+    if isinstance(tree, exp.Insert):
+        col_list = tree.this.expressions if isinstance(tree.this, exp.Schema) else []
+        if col_list:
+            fix_rows(col_list, tree.expression)
+    elif isinstance(tree, exp.Update):
+        fix_set(tree.expressions)
+    else:
+        for w in tree.args["whens"].expressions:
+            then = w.args.get("then")
+            if isinstance(then, exp.Update):
+                fix_set(then.expressions)
+            elif isinstance(then, exp.Insert):
+                col_list = then.this.expressions if isinstance(then.this, exp.Tuple) else []
+                fix_rows(col_list, then.expression)
+
+
 def coerce(tree: exp.Expr, types: TypeSchema, ctx: Ctx) -> exp.Expr:
     """Qualifizieren, Typen annotieren, Konflikte auflösen. Bei Fehlern: Baum unverändert."""
     try:
         q = qualify(tree.copy(), schema=types.schema, dialect="postgres", expand_stars=True, identify=False,
-                    quote_identifiers=False, validate_qualify_columns=False, expand_alias_refs=False)
+                    quote_identifiers=False, validate_qualify_columns=False, expand_alias_refs=False,
+                    allow_partial_qualification=True)
         annotate_types(q, schema=types.schema, dialect="postgres")
     except Exception as e:  # noqa: BLE001 – Inferenz ist best effort
-        ctx.warn(f"Typinferenz nicht möglich: {str(e).splitlines()[0][:100]}")
-        return tree
+        try:
+            # Rückfall: ohne Spaltenqualifizierung (nur explizit qualifizierte Spalten werden typisiert)
+            q = qualify(tree.copy(), schema=types.schema, dialect="postgres", expand_stars=False, identify=False,
+                        quote_identifiers=False, validate_qualify_columns=False, expand_alias_refs=False,
+                        qualify_columns=False)
+            annotate_types(q, schema=types.schema, dialect="postgres")
+            ctx.warn(f"Typinferenz nur teilweise: {str(e).splitlines()[0][:100]}")
+        except Exception:  # noqa: BLE001
+            ctx.warn(f"Typinferenz nicht möglich: {str(e).splitlines()[0][:100]}")
+            return tree
     nodes = list(q.walk())
     for n in reversed(nodes):
         new = _fix(n, ctx)

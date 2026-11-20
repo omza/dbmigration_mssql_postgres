@@ -202,6 +202,12 @@ def _anonymous(node: exp.Anonymous, ctx: Ctx) -> exp.Expr:
         return _fn("make_date", *a)
     if name in ("getutcdate", "sysutcdatetime"):
         return exp.cast(exp.AtTimeZone(this=exp.CurrentTimestamp(), zone=exp.Literal.string("UTC")), "timestamp")
+    if name == "patindex" and len(a) == 2 and isinstance(a[0], exp.Literal) and a[0].is_string:
+        return _fn("regexp_instr", a[1], exp.Literal.string(like_to_regex(a[0].this)))
+    if name in ("checksum", "binary_checksum") and a:
+        # Änderungserkennung: Hash über die Zeile (NULL-sicher); Werte nicht kompatibel zu MSSQL
+        return _fn("hashtext", exp.cast(exp.Tuple(expressions=list(a)) if len(a) > 1 else
+                                        _fn("row", a[0]), "text"))
     if name == "scope_identity":
         return _fn("lastval")
     if name == "newid":
@@ -213,6 +219,33 @@ def _anonymous(node: exp.Anonymous, ctx: Ctx) -> exp.Expr:
     if name in ("error_procedure", "error_line"):
         return exp.Null()
     return node
+
+
+def like_to_regex(pattern: str) -> str:
+    """T-SQL LIKE-Muster (%, _, [..]) -> POSIX-Regex; ohne führendes/abschließendes % verankert."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "%":
+            out.append(".*")
+        elif ch == "_":
+            out.append(".")
+        elif ch == "[":
+            j = pattern.find("]", i + 1)
+            if j == -1:
+                out.append(r"\[")
+            else:
+                body = pattern[i + 1:j]
+                out.append("[" + ("^" + body[1:] if body.startswith("^") else body) + "]")
+                i = j
+        else:
+            out.append("\\" + ch if ch in ".^$*+?(){}|\\" else ch)
+        i += 1
+    rx = "".join(out)
+    rx = rx[2:] if rx.startswith(".*") else "^" + rx
+    rx = rx[:-2] if rx.endswith(".*") else rx + "$"
+    return rx
 
 
 def _transform(node: exp.Expr, ctx: Ctx, cte_names: set[str]) -> exp.Expr:

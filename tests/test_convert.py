@@ -102,3 +102,25 @@ def test_tvf():
     assert "#variable_conflict use_column" in obj.sql
     assert "RETURN QUERY SELECT" in obj.sql
     assert "WHILE POSITION(',' IN p_s) > 0 LOOP" in obj.sql
+
+
+def test_merge_into_cte_and_assignments(settings):
+    from mssql2pg import mig
+    src = _src("core.load_gruppe")
+    obj = mig.convert(src, "localtimestamp", mig.type_schema(settings))
+    assert obj.status in ("ok", "warn"), obj.messages
+    sql = obj.sql
+    # MERGE in CTE -> Basistabelle, Filter in ON und NOT MATCHED BY SOURCE, berechnete Spalte eingesetzt
+    assert "MERGE INTO core.gruppe AS target" in sql
+    assert "targetrows" not in sql.lower().replace("merge into core.gruppe", "")
+    assert "AND (\n      target.id_gruppe > 0\n    )" in sql
+    assert "WHEN NOT MATCHED BY SOURCE AND target.id_gruppe > 0 THEN DELETE" in sql
+    assert "source.cs <> HASHTEXT(CAST(ROW(target.bezeichnung) AS TEXT))" in sql
+    assert "UPDATE SET\n      bezeichnung = source.bezeichnung" in sql
+    # INSERT ohne Spaltenliste: Identity-Spalte ausgelassen, Typen angeglichen
+    assert "INSERT INTO core.kunde (\n      name,\n      aktiv,\n      valid_to,\n      changed_at,\n      id_gruppe\n    )" in sql
+    assert "('x', TRUE, '31.12.2099', LOCALTIMESTAMP, 0)" in sql
+    # UPDATE: bool-Zuweisung, '' bei int -> 0, PATINDEX -> regexp_instr
+    assert "aktiv = FALSE" in sql
+    assert "COALESCE(id_gruppe, 0) = 0" in sql
+    assert "REGEXP_INSTR(name, '[0-9]') > 0" in sql

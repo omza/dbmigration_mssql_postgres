@@ -16,6 +16,7 @@ from datetime import datetime
 import click
 import psycopg
 
+from . import check as plcheck
 from .config import Settings
 from .deps import topo_order
 from .mig import load_manifest
@@ -35,6 +36,33 @@ def _err(e: Exception) -> str:
     return msg
 
 
+def run_checks(conn: psycopg.Connection, objs: dict[str, dict], deployed: list[str]) -> dict[str, dict] | None:
+    """plpgsql_check für alle deployten Funktionen/Prozeduren. None, wenn nicht verfügbar."""
+    reason = plcheck.ensure_extension(conn)
+    if reason:
+        click.echo(f"\nHinweis: Funktionsprüfung übersprungen – {reason}", err=True)
+        return None
+    funcs = [(k, objs[k]["pg_schema"], objs[k]["pg_name"]) for k in deployed
+             if objs[k]["type"] in ("function", "procedure")]
+    result = plcheck.check_functions(conn, funcs)
+    plcheck.report(result)
+    return result
+
+
+def run_check_only(settings: Settings) -> bool:
+    """Nur prüfen (ohne Deploy): alle Funktionen aus dem Manifest, die in der DB existieren."""
+    settings.require("pg_dsn")
+    manifest = load_manifest(settings.out_dir)
+    objs = {o["key"]: o for o in manifest["objects"]}
+    with psycopg.connect(settings.pg_dsn, autocommit=True) as conn:
+        result = run_checks(conn, objs, list(objs))
+    if result is None:
+        return False
+    (settings.out_dir / "check_report.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    return not any(r["errors"] for r in result.values())
+
+
 def managed_schemas(manifest: dict, settings: Settings) -> list[str]:
     protected = set(settings.blacklist)
     if not settings.raw_ddl:
@@ -43,7 +71,7 @@ def managed_schemas(manifest: dict, settings: Settings) -> list[str]:
     return sorted(s for s in schemas if s not in protected)
 
 
-def run_deploy(settings: Settings, dry_run: bool = False, yes: bool = False) -> bool:
+def run_deploy(settings: Settings, dry_run: bool = False, yes: bool = False, check: bool = True) -> bool:
     settings.require("pg_dsn")
     manifest = load_manifest(settings.out_dir)
     objs = {o["key"]: o for o in manifest["objects"]}
@@ -100,6 +128,11 @@ def run_deploy(settings: Settings, dry_run: bool = False, yes: bool = False) -> 
         for k, o in objs.items():
             if o["status"] not in DEPLOYABLE:
                 result[k] = {"status": "not_translated", "error": "; ".join(o["messages"])}
+
+        checked = run_checks(conn, objs, [k for k, v in result.items() if v["status"] == "deployed"]) \
+            if check else None
+        for k, c in (checked or {}).items():
+            result[k]["check"] = c
 
     report = {
         "deployed_at": datetime.now().isoformat(timespec="seconds"),

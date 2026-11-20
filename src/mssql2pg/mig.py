@@ -61,7 +61,8 @@ def convert(src: SourceObject, getdate: str, types: TypeSchema | None = None) ->
     if src.type == "table":
         obj, t = convert_table(src, getdate)
         if t is not None and types is not None:
-            types.add(t.pg_schema, t.pg_table, {c.pg_name: c.pg_type for c in t.columns})
+            types.add(t.pg_schema, t.pg_table, {c.pg_name: c.pg_type for c in t.columns},
+                      {c.pg_name for c in t.columns if c.identity})
         return obj
     if src.type == "view":
         return convert_view(src, getdate, types)
@@ -76,7 +77,8 @@ def type_schema(settings: Settings) -> TypeSchema:
         if s.type == "table":
             _, t = convert_table(s, settings.mapping.getdate)
             if t is not None:
-                types.add(t.pg_schema, t.pg_table, {c.pg_name: c.pg_type for c in t.columns})
+                types.add(t.pg_schema, t.pg_table, {c.pg_name: c.pg_type for c in t.columns},
+                          {c.pg_name for c in t.columns if c.identity})
     return types
 
 

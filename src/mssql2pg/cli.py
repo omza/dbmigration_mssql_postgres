@@ -70,12 +70,24 @@ def mig(ctx: click.Context, show: str | None) -> None:
 @main.command()
 @click.option("--dry-run", is_flag=True, help="Nur Reihenfolge anzeigen")
 @click.option("-y", "--yes", is_flag=True, help="Keine Rückfrage vor dem Zurücksetzen der Schemas")
+@click.option("--check/--no-check", default=True, show_default=True,
+              help="Deployte PL/pgSQL-Funktionen mit plpgsql_check prüfen")
 @click.pass_context
-def deploy(ctx: click.Context, dry_run: bool, yes: bool) -> None:
+def deploy(ctx: click.Context, dry_run: bool, yes: bool, check: bool) -> None:
     """Setzt die verwalteten Schemas zurück und deployt alle Objekte in Abhängigkeitsreihenfolge."""
     from .deploy import run_deploy
 
-    if not run_deploy(_settings(ctx), dry_run=dry_run, yes=yes):
+    if not run_deploy(_settings(ctx), dry_run=dry_run, yes=yes, check=check):
+        sys.exit(1)
+
+
+@main.command()
+@click.pass_context
+def check(ctx: click.Context) -> None:
+    """Prüft die deployten PL/pgSQL-Funktionen mit plpgsql_check (Report: OUT_DIR/check_report.json)."""
+    from .deploy import run_check_only
+
+    if not run_check_only(_settings(ctx)):
         sys.exit(1)
 
 
