@@ -1,0 +1,20 @@
+# Projektspezifisches Wissen für mssql2pg (kopieren nach mapping.yml)
+
+# Original-Bezeichner (lowercase) -> neuer PG-Name, z.B. für Namen > 63 Bytes
+renames:
+  abgleich_mit_rainer_hoffs_liste_ob_vorhanden_nv_bei_ihm_nicht_geführt: abgleich_rainer_hoffs_liste_nv_bei_ihm_nicht_geführt
+
+# PG-Tabelle -> Spalte (int/date/datetime) für die Chunk-Aufteilung großer Tabellen.
+# Default: einspaltiger Primärschlüssel.
+chunk_columns:
+  # core.messwerte: zeitpunkt
+
+# fnmatch-Muster schema.objekt (MSSQL-Namen, lowercase), die nie migriert werden
+exclude_objects:
+  - dbo.sysdiagrams
+  - dbo.sp_*diagram*
+  - dbo.fn_diagramobjects
+
+# PG-Ausdruck für GETDATE()/SYSDATETIME() in Defaults und Code
+# (localtimestamp = Transaktionsbeginn, clock_timestamp()::timestamp = Echtzeit)
+getdate: localtimestamp

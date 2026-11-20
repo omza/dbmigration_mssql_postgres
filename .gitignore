@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
-# Lokale Konfiguration / Reports
-migration.toml
+# Lokale Konfiguration / generierte Artefakte
+.env
+mapping.yml
+out/
 validate*.md

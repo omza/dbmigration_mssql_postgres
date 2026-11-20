@@ -1,75 +1,90 @@
-# EnergyDWH – Migration MS SQL Server 2014 → PostgreSQL 18
+# mssql2pg
 
-Quelle (T-SQL-Export, Stand MSSQL): `energydwh-main/`
-Ziel (portiertes PG-SQL, wird committet): `sql/`
-Werkzeug: `energydwh` (Python, `src/energydwh/`)
+Migriert gescriptete MS SQL Server Objekte (täglicher SSMS-Export aus Git) und Tabellendaten nach PostgreSQL (≥ 16, Ziel 18).
+Gedacht für wiederholte Migrationsläufe gegen lokale Dev-Instanzen.
 
-## Setup
-
-```bash
-uv sync --extra mssql          # mssql-python: offizieller MS-Treiber, kein System-ODBC nötig
-cp migration.example.toml migration.toml   # optional: Chunking/Worker/Ausschlüsse
-
-export MSSQL_CONN='SERVER=sqlhost,1433;DATABASE=EnergyDWH;UID=...;PWD=...;Encrypt=yes;TrustServerCertificate=yes'
-export PG_DSN='postgresql://user:pass@pghost:5432/energydwh'
+```text
+clear  →  mig  →  deploy  →  data  (→ validate)
 ```
 
-Zieldatenbank anlegen (ICU-Collation, case-sensitive):
+## Einrichtung
+
+```bash
+uv sync --extra mssql            # mssql-python (kein System-ODBC nötig); alternativ --extra pyodbc
+cp .env.example .env             # Zugangsdaten, Quellpfad, Blacklist, RAW-Schema
+cp mapping.example.yml mapping.yml
+```
+
+Das Git-Repo mit den MSSQL-Skripten wird außerhalb des Tools gepflegt (`git clone`/`git pull`); `MSSQL_SOURCE_DIR` zeigt darauf.
+Erwartetes Layout (beliebig tief): `<schema>.<name>.Tables.sql | .View.sql | .StoredProcedure.sql | .UserDefinedFunction.sql`.
+
+Empfohlene Zieldatenbank:
 
 ```sql
 CREATE DATABASE energydwh TEMPLATE template0 ENCODING 'UTF8'
-  LOCALE_PROVIDER icu ICU_LOCALE 'de-DE' LOCALE 'C.UTF-8';
+    LOCALE_PROVIDER icu ICU_LOCALE 'de-DE' LOCALE 'de_DE.UTF-8';
+ALTER DATABASE energydwh SET timezone = 'Europe/Berlin';
 ```
 
-## Ablauf
+## Befehle
 
-```bash
-uv run energydwh deploy                 # Schemas, Tabellen (ohne FKs/Indizes), später Funktionen/Views/Routinen
-uv run energydwh copy --dry-run         # Chunk-Plan ansehen (Zeilenzahlen kommen aus MSSQL)
-uv run energydwh copy -j 6              # Datenkopie; nach Abbruch: --resume
-uv run energydwh post                   # Indizes, FKs (NOT VALID + Validierung), Identity-Sequenzen, ANALYZE
-uv run energydwh validate --report validate.md   # Abgleich; Exit 1 bei Abweichungen
-```
+| Befehl | Wirkung |
+| --- | --- |
+| `mssql2pg clear` | löscht `OUT_DIR` (nie `overrides/`) |
+| `mssql2pg mig` | konvertiert alle Quellobjekte nach `OUT_DIR/<typ>/<schema>.<name>.sql`, Indizes/FKs nach `OUT_DIR/post/`, schreibt `manifest.json` (Status, Abhängigkeiten, Hinweise) |
+| `mssql2pg mig --show schema.name` | konvertiert ein Objekt und gibt es aus (schreibt nichts) |
+| `mssql2pg deploy [-y] [--dry-run]` | **löscht** alle verwalteten Schemas (`DROP SCHEMA … CASCADE`) und baut sie in Abhängigkeitsreihenfolge neu auf; Report in `OUT_DIR/deploy_report.json` |
+| `mssql2pg data [-t muster] [-x muster] [-j N] [--resume]` | kopiert alle Tabellen außer RAW-Schema/Blacklist (parallel, gechunkt, COPY), danach Indizes, FKs (`NOT VALID` + Validierung), Identity-Reset, `ANALYZE` |
+| `mssql2pg validate [-l 1..3] [--report r.md]` | Abgleich MSSQL ↔ PG: Zeilenzahl / Spaltenaggregate / Zeilen-Hashes |
 
-Filter für copy/validate: `-t 'core.*' -t raw.wilken_enzpt -x 'stage.*'`.
+Globale Option: `--env-file pfad` (Default `.env`).
 
-### deploy
-Wendet `sql/<stage>/*.sql` in Reihenfolge an (Verzeichnisse alphabetisch, innerhalb optional per `ORDER`-Datei).
-Jede Datei = eine Transaktion; Status + SHA-256 in `_migration.applied`, unveränderte Dateien werden übersprungen.
-`50_post` läuft nur über `energydwh post`.
+## Konfiguration
 
-### copy
-- Tabellen > `chunk_rows` werden über eine int/date/datetime-Spalte in Bereiche geteilt (Default: einspaltiger PK,
-  sonst `[copy.chunk_column]` in `migration.toml`). Ohne geeignete Spalte: ein Chunk.
-- Ein Chunk = eine PG-Transaktion (Bereich löschen → COPY → Status). Wiederholung ist idempotent.
-- Status: `_migration.copy_state`. `--resume` überspringt fertige Chunks.
-- NUL-Bytes (`\x00`) in Texten sind in PG nicht erlaubt und werden entfernt; Anzahl steht im Log und in `copy_state.nul_removed`.
-- Während der Kopie Talend-Loads auf MSSQL pausieren (keine Snapshot-Konsistenz über Chunks hinweg).
+`.env` – siehe [.env.example](.env.example). Wichtig:
 
-### validate
-| Stufe | Prüfung | Kosten |
-|---|---|---|
-| 1 | Zeilenzahl | gering |
-| 2 | je Spalte: Nicht-NULL-Anzahl, Summe / min-max / Längensumme / true-Anzahl / Bytes | eine Aggregat-Query je Seite |
-| 3 | alle Zeilen, normalisiert + gehasht, reihenfolgeunabhängig; Abweichungen zeilengenau mit PK | liest alles |
+* `SCHEMA_BLACKLIST` – Schemas, die weder migriert, deployt noch kopiert werden. Verweise darauf erzeugen eine Warnung.
+* `RAW_SCHEMA` – wird von Talend befüllt; **Daten werden nie kopiert**.
+* `RAW_DDL` – `true`: RAW-Tabellen werden von `mig`/`deploy` angelegt (damit abhängige Views deploybar sind);
+  `false`: RAW wird gar nicht angefasst (Talend legt die Tabellen an, `deploy` löscht das Schema nicht).
 
-Default: Stufe 3 für admin, core, mart_*, stage, dbo, dwh; Stufe 2 für raw. Mit `-l` übersteuerbar.
-Dasselbe Kommando dient im Parallelbetrieb als Abgleich (z.B. `validate -t 'core.*' -t 'mart_*'`).
+`mapping.yml` – siehe [mapping.example.yml](mapping.example.yml): `renames` (Namen > 63 Bytes), `chunk_columns`, `exclude_objects`, `getdate`.
 
-### generate (nur Entwicklung)
-`uv run energydwh generate` erzeugt `sql/00_bootstrap`, `sql/10_tables`, `sql/50_post` aus `energydwh-main/Tables`.
-Dateien mit Marker `-- GENERATED` werden überschrieben; Marker entfernen = Datei wird manuell gepflegt.
+## Konvertierung
 
-## Konventionen (Auszug)
-- Bezeichner lowercase; Sonderzeichen-Spalten gequotet (`"werksprüf_/eichung?"`).
-  Umbenennungen (63-Byte-Limit) in `src/energydwh/naming.py: RENAMES`.
-- Typen: `datetime`→`timestamp(3)`, `tinyint`→`smallint`, `bit`→`boolean`, `(max)`→`text`, `varbinary`→`bytea`,
-  `IDENTITY`→`GENERATED BY DEFAULT AS IDENTITY`. Collation-Klauseln entfallen.
-- Nicht migriert: `dbo.sysdiagrams` und Diagramm-Prozeduren.
+| Objekt | Verfahren |
+| --- | --- |
+| Tabellen | sqlglot-AST → Modell → PG-DDL. PK/UNIQUE im `CREATE TABLE`, FKs und Indizes erst nach der Datenkopie |
+| Views | sqlglot (T-SQL → PG) + eigene Nachbearbeitung |
+| Prozeduren | eigener Parser für den Kontrollfluss, DML-Statements über sqlglot → `CREATE FUNCTION … RETURNS void LANGUAGE plpgsql` (Aufruf `SELECT schema.proc(...)`) |
+| Funktionen | Skalar → `RETURNS typ`; Multi-Statement-TVF → `RETURNS TABLE (...)` mit `RETURN QUERY` |
+
+Konventionen: Bezeichner lowercase, Quoting nur wenn nötig; Parameter `@x` → `p_x`, Variablen → `v_x`; Temp-Tabellen und Tabellenvariablen → `tmp_x`;
+`TRY/CATCH` → `BEGIN … EXCEPTION WHEN OTHERS`; `+` auf Strings → `||`; `DATEDIFF` mit T-SQL-Semantik (Grenzübergänge);
+`TRY_CAST` → `pg_input_is_valid()`; `CONVERT(…, style)` → `to_char`/`to_date`/`to_timestamp`; Transaktionssteuerung in Prozeduren wird entfernt (Warnung).
+
+Nicht automatisch übersetzbar (Status `failed`, Override nötig): Cursor, Prozeduren mit Resultsets, Inline-TVFs, PIVOT, GOTO, EXEC mit OUTPUT-Parametern.
+Implizite Typkonvertierungen (z.B. `int = varchar`) erkennt `mig` nicht – sie fallen beim `deploy` auf.
+
+## Overrides
+
+Handgepflegte Dateien unter `overrides/<typ>/<pg_schema>.<pg_name>.sql` (`typ` = `table|view|function|procedure|post`) ersetzen das generierte SQL vollständig.
+Overrides ohne Quellobjekt (z.B. Hilfsfunktionen) werden zusätzlich deployt. Abhängigkeiten werden automatisch erkannt,
+zusätzlich explizit per Kommentar: `-- depends: core.kunde, util.helper`.
+
+Workflow für fehlgeschlagene Objekte: `out/<typ>/<datei>.sql` enthält die Fehlermeldung und das Original als Kommentar → nach `overrides/` kopieren, portieren, `mig` + `deploy`.
+
+## Deploy-Verhalten
+
+* Reihenfolge: topologisch nach erkannten Referenzen (Token-Analyse), bei Gleichstand Tabellen → Funktionen → Views → Prozeduren.
+* Ein Objekt = eine Transaktion. Fehler brechen den Lauf nicht ab: abhängige Views werden übersprungen,
+  PL/pgSQL-Funktionen trotzdem angelegt (ihr Rumpf wird erst zur Laufzeit geprüft). Exit-Code ≠ 0 bei Fehlern.
+* Zyklen werden gemeldet und nicht deployt.
 
 ## Tests
+
 ```bash
 uv run pytest
-# Synthetische Quell-DB auf einem MSSQL-Testcontainer:
-uv run python tests/mssql_seed.py "SERVER=localhost,51433;UID=sa;PWD=...;Encrypt=yes;TrustServerCertificate=yes" 300
 ```
+
+Unit-Tests mit kleinen Fixtures unter `tests/fixtures/src` (kein Echt-Export im Repo).
