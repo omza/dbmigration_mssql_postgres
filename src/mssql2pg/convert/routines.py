@@ -25,6 +25,7 @@ from sqlglot.tokens import Token, TokenType
 from ..model import PgObject, SourceObject
 from ..naming import pg_name, quote
 from .common import Ctx, Unsupported, map_datatype, normalize, to_pg
+from .types import TypeSchema, coerce
 
 
 
@@ -63,13 +64,14 @@ class Routine:
 
 
 class Parser:
-    def __init__(self, sql: str, ctx: Ctx, routine: Routine):
+    def __init__(self, sql: str, ctx: Ctx, routine: Routine, types: TypeSchema | None = None):
         self.sql = sql
         self.toks: list[Token] = tokenize(sql)
         self.i = 0
         self.ctx = ctx
         self.r = routine
-        self._types: dict[str, str] = {}   # PL/pgSQL-Variable -> PG-Typ
+        self._types = ctx.var_types        # PL/pgSQL-Variable -> PG-Typ
+        self.types = types
 
     # ------------------------------------------------------------------ Token-Helfer
 
@@ -525,6 +527,26 @@ class Parser:
             out.append("GET DIAGNOSTICS v_rowcount = ROW_COUNT;")
         return out
 
+    def norm(self, tree: exp.Expr) -> exp.Expr:
+        """normalize + Typinferenz auf den äußersten SELECTs (DML-Ziele bleiben unqualifiziert)."""
+        tree = normalize(tree, self.ctx)
+        if self.types is None:
+            return tree
+        if isinstance(tree, (exp.Select, exp.SetOperation)):
+            return coerce(tree, self.types, self.ctx)
+        def nested(node: exp.Expr) -> bool:
+            a = node.parent
+            while a is not None and a is not tree:
+                if isinstance(a, (exp.Select, exp.SetOperation)):
+                    return True
+                a = a.parent
+            return False
+
+        outer = [s for s in tree.find_all(exp.Select, exp.SetOperation) if not nested(s)]
+        for s in outer:
+            s.replace(coerce(s, self.types, self.ctx))
+        return tree
+
     def translate_dml(self, tree: exp.Expr) -> list[str]:
         ctx = self.ctx
         # INSERT INTO @rueckgabe ... (Multi-Statement-TVF) -> RETURN QUERY
@@ -535,7 +557,7 @@ class Parser:
                 q = tree.expression
                 if isinstance(q, exp.Values):
                     q = exp.select(*q.expressions[0].expressions) if len(q.expressions) == 1 else q
-                return [*_lines(f"RETURN QUERY {to_pg(normalize(q, ctx))};")]
+                return [*_lines(f"RETURN QUERY {to_pg(self.norm(q))};")]
         for t in tree.find_all(exp.Table):
             if isinstance(t.this, exp.Parameter) and t.this.name.lower() not in ctx.table_vars:
                 raise Unsupported(f"Unbekannte Tabellenvariable @{t.this.name}")
@@ -552,7 +574,7 @@ class Parser:
             tree.set("expressions", [e.expression for e in tree.expressions])
             if not tree.args.get("from_") and len(targets) == 1 and not tree.args.get("where"):
                 return [f"{targets[0]} := {to_pg(normalize(tree.expressions[0], ctx), pretty=False)};"]
-            body = to_pg(normalize(tree, ctx))
+            body = to_pg(self.norm(tree))
             # INTO direkt hinter die Select-Liste (vor FROM) setzen
             into = f"INTO {', '.join(targets)}"
             m = re.search(r"\nFROM\b", body)
@@ -564,7 +586,7 @@ class Parser:
             into = tree.args["into"]
             tree.set("into", None)
             tname = self.temp_name(into.this)
-            body = to_pg(normalize(tree, ctx))
+            body = to_pg(self.norm(tree))
             return [f"DROP TABLE IF EXISTS {tname};", *_lines(f"CREATE TEMP TABLE {tname} AS\n{body};")]
 
         if isinstance(tree, exp.Select):
@@ -591,7 +613,7 @@ class Parser:
         if isinstance(tree, exp.Delete):
             _fix_delete_from(tree)
 
-        return _lines(to_pg(normalize(tree, ctx)) + ";")
+        return _lines(to_pg(self.norm(tree)) + ";")
 
     def temp_name(self, table: exp.Expr) -> str:
         name = table.name.lstrip("#").lower()
@@ -818,7 +840,7 @@ def _header(p: Parser, r: Routine, obj_type: str) -> None:
     p.expect("AS")
 
 
-def convert_routine(src: SourceObject, getdate: str) -> PgObject:
+def convert_routine(src: SourceObject, getdate: str, types: TypeSchema | None = None) -> PgObject:
     obj = PgObject(src.key, src.type, pg_name(src.schema), pg_name(src.name), source=str(src.path))
     ctx = Ctx(getdate=getdate)
     r = Routine(kind="procedure")
@@ -833,11 +855,12 @@ def convert_routine(src: SourceObject, getdate: str) -> PgObject:
         if r.uses_rowcount:
             ctx.system_vars["rowcount"] = "v_rowcount"
             r.decls.append("v_rowcount bigint := 0;")
+            ctx.var_types["v_rowcount"] = "bigint"
         ctx.system_vars.update({"trancount": "0", "error": "0", "servername": "inet_server_addr()::text",
                                 "identity": "lastval()"})
         if re.search(r"@@IDENTITY|SCOPE_IDENTITY\s*\(", sql, re.I):
             ctx.warn("@@IDENTITY/SCOPE_IDENTITY() als lastval() übersetzt")
-        p = Parser(sql, ctx, r)
+        p = Parser(sql, ctx, r, types)
         _header(p, r, src.type)
         body = p.block(())
     except Unsupported as e:

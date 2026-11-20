@@ -20,8 +20,9 @@ from . import naming
 from .config import Settings
 from .convert.routines import convert_routine
 from .convert.tables import Table, convert_table
+from .convert.types import TypeSchema
 from .convert.views import convert_view
-from .deps import find_references
+from .deps import find_references, topo_order
 from .model import FAILED, OVERRIDE, TYPES, PgObject, SourceObject
 from .source import load_sources, read_text
 
@@ -56,12 +57,43 @@ def source_tables(settings: Settings, include_raw: bool = False) -> list[Table]:
     return out
 
 
-def convert(src: SourceObject, getdate: str) -> PgObject:
+def convert(src: SourceObject, getdate: str, types: TypeSchema | None = None) -> PgObject:
     if src.type == "table":
-        return convert_table(src, getdate)[0]
+        obj, t = convert_table(src, getdate)
+        if t is not None and types is not None:
+            types.add(t.pg_schema, t.pg_table, {c.pg_name: c.pg_type for c in t.columns})
+        return obj
     if src.type == "view":
-        return convert_view(src, getdate)
-    return convert_routine(src, getdate)
+        return convert_view(src, getdate, types)
+    return convert_routine(src, getdate, types)
+
+
+def type_schema(settings: Settings) -> TypeSchema:
+    """Spaltentypen aller Quelltabellen – auch RAW, wenn RAW_DDL=false (Typen trotzdem bekannt)."""
+    types = TypeSchema()
+    srcs = load_sources(settings.mssql_source_dir, settings.blacklist, settings.mapping.exclude_objects)
+    for s in srcs:
+        if s.type == "table":
+            _, t = convert_table(s, settings.mapping.getdate)
+            if t is not None:
+                types.add(t.pg_schema, t.pg_table, {c.pg_name: c.pg_type for c in t.columns})
+    return types
+
+
+def conversion_order(srcs: dict[str, SourceObject]) -> tuple[list[str], dict[str, list[str]]]:
+    """Abhängigkeiten aus den Quellen -> Konvertierungsreihenfolge (Views vor abhängigen Views)."""
+    known: dict[str, str] = {}
+    for s in srcs.values():
+        known[s.key] = s.key
+        try:
+            known[f"{naming.pg_name(s.schema)}.{naming.pg_name(s.name)}"] = s.key
+        except ValueError:
+            pass
+    deps = {}
+    for k, s in srcs.items():
+        deps[k] = [] if s.type == "table" else sorted(find_references(s.sql, known, k)[0])
+    order, cyclic = topo_order(list(srcs), deps, lambda k: (TYPES.index(srcs[k].type), k))
+    return order + cyclic, deps
 
 
 def apply_overrides(objs: dict[str, PgObject], overrides_dir: Path) -> list[PgObject]:
@@ -136,11 +168,13 @@ def run_mig(settings: Settings, only: tuple[str, ...] = (), types: tuple[str, ..
     prepare(settings)
     out = settings.out_dir
     srcs = {s.key: s for s in sources(settings)}
+    order, _ = conversion_order(srcs)
+    types = type_schema(settings)
     objs: dict[str, PgObject] = {}
-    with click.progressbar(list(srcs.values()), label="Konvertiere", show_pos=True) as bar:
+    with click.progressbar([srcs[k] for k in order], label="Konvertiere", show_pos=True) as bar:
         for s in bar:
             try:
-                objs[s.key] = convert(s, settings.mapping.getdate)
+                objs[s.key] = convert(s, settings.mapping.getdate, types)
             except ValueError as e:   # z.B. Bezeichner > 63 Bytes
                 o = PgObject(s.key, s.type, s.schema.lower(), s.name.lower(), source=str(s.path))
                 o.fail(str(e))

@@ -64,7 +64,11 @@ Konventionen: Bezeichner lowercase, Quoting nur wenn nötig; Parameter `@x` → 
 `TRY_CAST` → `pg_input_is_valid()`; `CONVERT(…, style)` → `to_char`/`to_date`/`to_timestamp`; Transaktionssteuerung in Prozeduren wird entfernt (Warnung).
 
 Nicht automatisch übersetzbar (Status `failed`, Override nötig): Cursor, Prozeduren mit Resultsets, Inline-TVFs, PIVOT, GOTO, EXEC mit OUTPUT-Parametern.
-Implizite Typkonvertierungen (z.B. `int = varchar`) erkennt `mig` nicht – sie fallen beim `deploy` auf.
+Implizite Typkonvertierungen: `mig` ermittelt die Spaltentypen aller Tabellen und (in Abhängigkeitsreihenfolge) Views
+und macht T-SQL-Konvertierungen nach Datentyp-Rangfolge explizit (`int = varchar` → Cast, `bit = 1` → `= TRUE`,
+`datetime + n` → `+ n * INTERVAL '1 day'`, `ISNULL` vs. `COALESCE`, UNION-Spalten inkl. `NULL`).
+Dafür werden Spalten in der Ausgabe qualifiziert und `*` expandiert (semantisch identisch).
+In Routinen gilt das nur für SELECT-Teile; PL/pgSQL-Rümpfe prüft PostgreSQL erst zur Laufzeit.
 
 ## Overrides
 

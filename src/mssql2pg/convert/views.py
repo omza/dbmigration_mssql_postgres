@@ -7,9 +7,10 @@ from sqlglot import exp
 from ..model import PgObject, SourceObject
 from ..naming import pg_name, quote
 from .common import Ctx, Unsupported, normalize, parse_one, to_pg
+from .types import TypeSchema, coerce, output_columns
 
 
-def convert_view(src: SourceObject, getdate: str) -> PgObject:
+def convert_view(src: SourceObject, getdate: str, types: TypeSchema | None = None) -> PgObject:
     obj = PgObject(src.key, "view", pg_name(src.schema), pg_name(src.name), source=str(src.path))
     ctx = Ctx(getdate=getdate)
     try:
@@ -30,6 +31,9 @@ def convert_view(src: SourceObject, getdate: str) -> PgObject:
             # T-SQL erlaubt ORDER BY in Views nur mit TOP; PG braucht es nicht
             ctx.warn("ORDER BY in View beibehalten")
         query = normalize(query.copy(), ctx)
+        if types is not None:
+            query = coerce(query, types, ctx)
+            types.add(obj.pg_schema, obj.pg_name, output_columns(query))
         body = to_pg(query)
     except Unsupported as e:
         obj.fail(str(e))

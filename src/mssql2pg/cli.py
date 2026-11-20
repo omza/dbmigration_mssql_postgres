@@ -56,7 +56,7 @@ def mig(ctx: click.Context, show: str | None) -> None:
         src = next((x for x in m.sources(s) if x.key == show.lower()), None)
         if src is None:
             raise click.ClickException(f"{show} nicht in {s.mssql_source_dir} gefunden (oder ausgeschlossen)")
-        obj = m.convert(src, s.mapping.getdate)
+        obj = m.convert(src, s.mapping.getdate, m.type_schema(s))
         click.echo(f"-- Status: {obj.status}")
         for msg in obj.messages:
             click.echo(f"-- Hinweis: {msg}")

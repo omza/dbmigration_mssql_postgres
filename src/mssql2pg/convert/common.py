@@ -35,6 +35,8 @@ class Ctx:
     temp_tables: dict[str, str] = field(default_factory=dict)
     # Tabellenvariablen (@name, lowercase) -> Temp-Tabelle
     table_vars: dict[str, str] = field(default_factory=dict)
+    # PL/pgSQL-Variable -> PG-Typ (für die Typinferenz)
+    var_types: dict[str, str] = field(default_factory=dict)
 
     def warn(self, msg: str) -> None:
         if msg not in self.warnings:
@@ -257,6 +259,14 @@ def _transform(node: exp.Expr, ctx: Ctx, cte_names: set[str]) -> exp.Expr:
 
     if isinstance(node, exp.DataType):
         return map_datatype(node)
+
+    if isinstance(node, exp.OnProperty):        # Filegroup: ON [PRIMARY]
+        node.pop()
+        return node
+
+    if isinstance(node, exp.Create) and "INDEX" in str(node.kind):
+        node.set("kind", "INDEX")
+        return node
 
     if isinstance(node, (exp.CurrentTimestamp, exp.CurrentDatetime)) or (
         isinstance(node, exp.Anonymous) and node.name.lower() in ("getdate", "sysdatetime")
