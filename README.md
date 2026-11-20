@@ -40,7 +40,7 @@ Meldungen zu Temp-Tabellen (`tmp_*`) gelten als „nicht prüfbar“, weil diese
 | `mssql2pg mig` | konvertiert alle Quellobjekte nach `OUT_DIR/<typ>/<schema>.<name>.sql`, Indizes/FKs nach `OUT_DIR/post/`, schreibt `manifest.json` (Status, Abhängigkeiten, Hinweise) |
 | `mssql2pg mig --show schema.name` | konvertiert ein Objekt und gibt es aus (schreibt nichts) |
 | `mssql2pg deploy [-y] [--dry-run]` | **löscht** alle verwalteten Schemas (`DROP SCHEMA … CASCADE`) und baut sie in Abhängigkeitsreihenfolge neu auf; Report in `OUT_DIR/deploy_report.json` |
-| `mssql2pg data [-t muster] [-x muster] [-j N] [--resume]` | kopiert alle Tabellen außer RAW-Schema/Blacklist (parallel, gechunkt, COPY), danach Indizes, FKs (`NOT VALID` + Validierung), Identity-Reset, `ANALYZE` |
+| `mssql2pg data [-t muster] [-x muster] [-j N] [--resume]` | kopiert alle Tabellen außer RAW-Schema/Blacklist (parallel, gechunkt, COPY; MSSQL wird nur gelesen), danach Indizes, FKs (`NOT VALID` + Validierung), Identity-Reset, `ANALYZE`. Beliebig wiederholbar: betroffene FKs werden vorher entfernt und danach neu angelegt |
 | `mssql2pg check` | prüft die deployten PL/pgSQL-Funktionen mit `plpgsql_check` (Report `OUT_DIR/check_report.json`); läuft bei `deploy` automatisch mit (`--no-check` zum Abschalten) |
 | `mssql2pg validate [-l 1..3] [--report r.md]` | Abgleich MSSQL ↔ PG: Zeilenzahl / Spaltenaggregate / Zeilen-Hashes |
 
@@ -96,6 +96,18 @@ Workflow für fehlgeschlagene Objekte: `out/<typ>/<datei>.sql` enthält die Fehl
 * Zyklen werden gemeldet und nicht deployt.
 
 ## Tests
+
+Für Testläufe ohne echte Daten gibt es `tools/mssql_seed.py`: Es legt die Tabellen aus den Quellskripten in einer
+**leeren MSSQL-Dev-Datenbank** an und befüllt sie mit synthetischen Daten (Grenzfälle: NULL, Umlaute, NUL-Bytes).
+Nicht Teil des normalen Ablaufs – dort wird MSSQL nur gelesen.
+
+```bash
+uv run python tools/mssql_seed.py --rows 1000 --big admin.load_log=20000   # --reset: Skript-Tabellen vorher löschen
+COPY_CHUNK_ROWS=5000 uv run mssql2pg data                                   # kleine Chunks erzwingen
+uv run mssql2pg validate -l 3
+```
+
+Unit-Tests:
 
 ```bash
 uv run pytest

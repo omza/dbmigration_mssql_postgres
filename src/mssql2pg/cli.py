@@ -131,9 +131,9 @@ def data(ctx: click.Context, tables: tuple[str, ...], exclude: tuple[str, ...], 
     todo = [t for t in all_tables if t.key in existing]
     if not todo:
         raise click.ClickException("Keine Tabellen zu kopieren")
-    ok = True
+    dropped: set[str] = set()
     if not post_only:
-        run_copy(todo, s.mssql_conn, s.pg_dsn, workers or s.copy_workers, s.copy_chunk_rows, s.copy_fetch_size,
+        dropped = run_copy(todo, s.mssql_conn, s.pg_dsn, workers or s.copy_workers, s.copy_chunk_rows, s.copy_fetch_size,
                  resume, s.mapping.chunk_columns, dry_run)
     if dry_run or no_post:
         return
@@ -142,7 +142,10 @@ def data(ctx: click.Context, tables: tuple[str, ...], exclude: tuple[str, ...], 
     for o in manifest["objects"]:
         if o["type"] == "table" and o.get("post_file"):
             post_sql[f"{o['pg_schema']}.{o['pg_name']}"] = (s.out_dir / o["post_file"]).read_text(encoding="utf-8")
-    ok = run_post(s.pg_dsn, todo, post_sql)
+    # FKs von Tabellen außerhalb der Auswahl, die auf kopierte Tabellen zeigen, ebenfalls neu anlegen
+    todo_keys = {t.key for t in todo}
+    extra = [t for t in source_tables(s) if t.key in dropped - todo_keys and t.key in existing]
+    ok = run_post(s.pg_dsn, todo + extra, post_sql)
     if not ok:
         sys.exit(1)
 

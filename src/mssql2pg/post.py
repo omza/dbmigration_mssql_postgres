@@ -43,7 +43,10 @@ def run_post(pg_dsn: str, tables: list[Table], post_sql: dict[str, str]) -> bool
     errors = 0
 
     def notice(diag) -> None:
-        click.echo(f"  {diag.severity}: {diag.message_primary}")
+        msg = diag.message_primary or ""
+        if msg.endswith("does not exist, skipping"):      # DROP ... IF EXISTS
+            return
+        click.echo(f"  {diag.severity}: {msg}")
 
     with psycopg.connect(pg_dsn, autocommit=True) as conn:
         conn.add_notice_handler(notice)

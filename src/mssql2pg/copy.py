@@ -184,6 +184,25 @@ def select_tables(tables: list[Table], patterns: tuple[str, ...], excludes: tupl
     return [t for t in out if not any(fnmatch.fnmatch(t.key, p.lower()) for p in excludes)]
 
 
+def drop_foreign_keys(pg: psycopg.Connection, keys: list[str]) -> set[str]:
+    """FKs auf und zu den Zieltabellen entfernen (sonst scheitern TRUNCATE/DELETE bei wiederholten Läufen)."""
+    rows = pg.execute(
+        """SELECT c.conrelid::regclass::text, n.nspname || '.' || r.relname, c.conname
+           FROM pg_constraint c
+           JOIN pg_class r ON r.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = r.relnamespace
+           JOIN pg_class f ON f.oid = c.confrelid
+           JOIN pg_namespace fn ON fn.oid = f.relnamespace
+           WHERE c.contype = 'f'
+             AND (n.nspname || '.' || r.relname = ANY(%s) OR fn.nspname || '.' || f.relname = ANY(%s))""",
+        (keys, keys)).fetchall()
+    for regclass, _, conname in rows:
+        pg.execute(f"ALTER TABLE {regclass} DROP CONSTRAINT IF EXISTS {quote(conname)}")
+    if rows:
+        click.echo(f"{len(rows)} Foreign Keys vor der Kopie entfernt (werden danach neu angelegt)")
+    return {key for _, key, _ in rows}
+
+
 def run_copy(
     tables: list[Table],
     mssql_conn_str: str,
@@ -194,9 +213,13 @@ def run_copy(
     resume: bool,
     overrides: dict[str, str],
     dry_run: bool,
-) -> None:
+) -> set[str]:
+    """-> Schlüssel aller Tabellen, deren FKs vor der Kopie entfernt wurden (post legt sie neu an)."""
+    dropped: set[str] = set()
     with psycopg.connect(pg_dsn, autocommit=True) as pg:
         pg.execute(_STATE_DDL)
+        if not dry_run:
+            dropped = drop_foreign_keys(pg, [t.key for t in tables])
         if not resume and not dry_run:
             keys = [t.key for t in tables]
             pg.execute("DELETE FROM _migration.copy_state WHERE tbl = ANY(%s)", (keys,))
@@ -205,9 +228,18 @@ def run_copy(
     click.echo(f"Plane Chunks für {len(tables)} Tabellen ...")
     src = mssql.connect(mssql_conn_str)
     todo: list[Chunk] = []
+    missing: list[str] = []
     try:
         for t in tables:
-            chunks = plan_chunks(src, t, chunk_rows, overrides)
+            try:
+                chunks = plan_chunks(src, t, chunk_rows, overrides)
+            except click.ClickException:
+                raise
+            except Exception as e:  # noqa: BLE001 – z.B. Tabelle fehlt in der MSSQL-Quelle
+                msg = str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__
+                missing.append(t.key)
+                click.echo(f"  übersprungen {t.key}: {msg[:160]}", err=True)
+                continue
             pending = [c for c in chunks if (c.key, c.index, c.n_chunks) not in done]
             if dry_run:
                 click.echo(f"  {chunks[0].key}: {len(chunks)} Chunk(s), offen {len(pending)}")
@@ -228,8 +260,12 @@ def run_copy(
             todo.extend(pending)
     finally:
         src.close()
+    if missing:
+        click.echo(f"{len(missing)} von {len(tables)} Tabellen in der MSSQL-Quelle nicht lesbar", err=True)
+        if len(missing) == len(tables):
+            raise click.ClickException("Keine Quelltabelle lesbar – MSSQL_CONN/DATABASE prüfen")
     if dry_run:
-        return
+        return dropped
 
     # große Chunks zuerst ist nicht bekannt -> gechunkte Tabellen zuerst, damit sie parallelisiert werden
     todo.sort(key=lambda c: -c.n_chunks)
@@ -254,3 +290,4 @@ def run_copy(
     click.echo(f"{total_rows:,} Zeilen in {time.monotonic() - t0:.0f}s kopiert, {len(errors)} Fehler")
     if errors:
         raise click.ClickException("Kopie unvollständig – nach Behebung mit --resume fortsetzen")
+    return dropped
