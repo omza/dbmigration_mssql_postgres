@@ -1,17 +1,33 @@
 [project]
 name = "energydwh"
 version = "0.1.0"
-description = "Add your description here"
+description = "Migration EnergyDWH: MS SQL Server 2014 -> PostgreSQL 18"
 readme = "README.md"
 authors = [
     { name = "Oliver Meyer", email = "omza@live.de" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "click>=8.1",
+    "psycopg[binary]>=3.2",
+    "sqlglot>=26",
+]
+
+[project.optional-dependencies]
+# mssql-python: offizieller MS-Treiber, bringt alles mit (kein System-ODBC nötig)
+mssql = ["mssql-python>=1.18"]
+# Alternative: pyodbc braucht unixODBC + MS ODBC Driver 18 auf dem Host
+pyodbc = ["pyodbc>=5.1"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
 
 [project.scripts]
-energydwh = "energydwh:main"
+energydwh = "energydwh.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

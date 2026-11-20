@@ -1,0 +1,14 @@
+# Kopie nach migration.toml und anpassen. Verbindungsdaten NICHT hier, sondern per ENV:
+#   export MSSQL_CONN='SERVER=sqlhost,1433;DATABASE=EnergyDWH;UID=...;PWD=...;Encrypt=yes;TrustServerCertificate=yes'
+#   export PG_DSN='postgresql://user:pass@pghost:5432/energydwh'
+
+[copy]
+workers = 6              # parallele Prozesse
+chunk_rows = 5_000_000   # Tabellen darüber werden in Bereiche aufgeteilt
+exclude = []             # z.B. ["stage.*"] – Muster schema.tabelle
+
+# Chunk-Spalte für große Tabellen ohne einspaltigen Integer-/Datums-PK
+# (muss int, date oder datetime sein). Schlüssel lowercase.
+[copy.chunk_column]
+# "raw.argos_lastgang" = "zeitstempel"
+# "core.messwerte" = "zeitstempel_utc"
